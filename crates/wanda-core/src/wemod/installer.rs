@@ -27,12 +27,14 @@ impl<'a> WemodInstaller<'a> {
     fn build_env(&self) -> HashMap<String, String> {
         let mut env = HashMap::new();
 
+        // Use the pfx subdirectory as the Wine prefix (Proton convention)
         env.insert(
             "WINEPREFIX".to_string(),
-            self.prefix.path.to_string_lossy().to_string(),
+            self.prefix.pfx_path().to_string_lossy().to_string(),
         );
         env.insert("WINEARCH".to_string(), "win64".to_string());
-        env.insert("WINEDEBUG".to_string(), "warn+all".to_string());
+        // Disable Wine debug output to prevent OOM from massive log accumulation
+        env.insert("WINEDEBUG".to_string(), "-all".to_string());
 
         // Proton compatibility flags
         env.insert("PROTON_NO_ESYNC".to_string(), "1".to_string());
@@ -104,12 +106,11 @@ impl<'a> WemodInstaller<'a> {
         let wine = self.wine_exe();
 
         info!("Using wine: {}", wine);
-        info!("Running: {} {} /S", wine, installer_path.display());
+        info!("Running: {} {}", wine, installer_path.display());
 
-        // WeMod installer supports silent installation with /S flag
+        // WeMod uses Squirrel installer which runs silently by default
         let output = Command::new(&wine)
             .arg(installer_path)
-            .arg("/S") // Silent install
             .envs(&env)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -173,8 +174,11 @@ impl<'a> WemodInstaller<'a> {
             return Ok(true);
         }
 
-        // Also check alternative locations
+        // Also check alternative locations (WeMod rebranded to "Wand")
         let alt_locations = [
+            self.prefix
+                .user_folder()
+                .join("AppData/Local/Wand/WeMod.exe"),
             self.prefix
                 .user_folder()
                 .join("AppData/Local/WeMod/WeMod.exe"),
@@ -271,27 +275,78 @@ impl<'a> WemodInstaller<'a> {
 
     /// Run WeMod standalone (for testing or manual use)
     pub async fn run(&self) -> Result<tokio::process::Child> {
-        let wemod_exe = self.prefix.wemod_exe();
+        // Find WeMod executable - check app directory first, then root
+        let wemod_path = self.prefix.wemod_path();
+        let wemod_exe = self.find_wemod_exe(&wemod_path)?;
 
-        if !wemod_exe.exists() {
-            return Err(WandaError::WemodNotInstalled);
-        }
-
-        let env = self.build_env();
+        let mut env = self.build_env();
         let wine = self.wine_exe();
 
-        info!("Starting WeMod...");
+        // Add Proton library paths for proper DLL loading
+        let proton_lib64 = self.proton.path.join("files/lib64");
+        let proton_lib = self.proton.path.join("files/lib");
+        let mut ld_path = String::new();
+        if proton_lib64.exists() {
+            ld_path.push_str(&proton_lib64.to_string_lossy());
+        }
+        if proton_lib.exists() {
+            if !ld_path.is_empty() {
+                ld_path.push(':');
+            }
+            ld_path.push_str(&proton_lib.to_string_lossy());
+        }
+        if let Ok(existing) = std::env::var("LD_LIBRARY_PATH") {
+            if !ld_path.is_empty() {
+                ld_path.push(':');
+            }
+            ld_path.push_str(&existing);
+        }
+        if !ld_path.is_empty() {
+            env.insert("LD_LIBRARY_PATH".to_string(), ld_path);
+        }
 
+        info!("Starting WeMod from: {}", wemod_exe.display());
+        info!("Using wine: {}", wine);
+
+        // Run WeMod with required flags for Wine/Proton compatibility
         let child = Command::new(&wine)
             .arg(&wemod_exe)
+            .arg("--no-sandbox")      // Required for Wine
+            .arg("--disable-gpu")     // Avoid GPU compositor issues
             .envs(&env)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
             .spawn()
             .map_err(|e| WandaError::LaunchFailed {
                 reason: format!("Failed to start WeMod: {}", e),
             })?;
 
         Ok(child)
+    }
+
+    /// Find the WeMod executable (handles both app-X.Y.Z and root locations)
+    fn find_wemod_exe(&self, wemod_path: &std::path::Path) -> Result<std::path::PathBuf> {
+        // First check for versioned app directory (e.g., app-11.5.0/WeMod.exe)
+        if let Ok(entries) = std::fs::read_dir(wemod_path) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with("app-") && entry.path().is_dir() {
+                    let app_exe = entry.path().join("WeMod.exe");
+                    if app_exe.exists() {
+                        debug!("Found WeMod in app directory: {}", app_exe.display());
+                        return Ok(app_exe);
+                    }
+                }
+            }
+        }
+
+        // Fall back to root WeMod.exe (launcher)
+        let root_exe = wemod_path.join("WeMod.exe");
+        if root_exe.exists() {
+            debug!("Using root WeMod.exe: {}", root_exe.display());
+            return Ok(root_exe);
+        }
+
+        Err(WandaError::WemodNotInstalled)
     }
 }

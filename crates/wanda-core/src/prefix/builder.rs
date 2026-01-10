@@ -9,7 +9,9 @@ use tracing::{debug, error, info, warn};
 
 /// Builds and initializes Wine prefixes for WeMod
 pub struct PrefixBuilder<'a> {
-    /// Path where the prefix will be created
+    /// Base path for the wanda prefix (STEAM_COMPAT_DATA_PATH equivalent)
+    base_path: PathBuf,
+    /// Actual Wine prefix path (pfx subdirectory, used by Proton)
     prefix_path: PathBuf,
     /// Proton version to use
     proton: &'a ProtonVersion,
@@ -17,11 +19,26 @@ pub struct PrefixBuilder<'a> {
 
 impl<'a> PrefixBuilder<'a> {
     /// Create a new prefix builder
-    pub fn new(prefix_path: &Path, proton: &'a ProtonVersion) -> Self {
+    ///
+    /// Note: Proton creates a `pfx` subdirectory inside the base path for the actual
+    /// Wine prefix. We install dependencies (like .NET) into the pfx directory so
+    /// they're available when running apps through Proton.
+    pub fn new(base_path: &Path, proton: &'a ProtonVersion) -> Self {
         Self {
-            prefix_path: prefix_path.to_path_buf(),
+            base_path: base_path.to_path_buf(),
+            prefix_path: base_path.join("pfx"),
             proton,
         }
+    }
+
+    /// Get the base path (STEAM_COMPAT_DATA_PATH equivalent)
+    pub fn base_path(&self) -> &Path {
+        &self.base_path
+    }
+
+    /// Get the actual Wine prefix path (pfx subdirectory)
+    pub fn wine_prefix_path(&self) -> &Path {
+        &self.prefix_path
     }
 
     /// Get path to Wine executable (prefer Proton's bundled wine)
@@ -98,8 +115,8 @@ impl<'a> PrefixBuilder<'a> {
         env.insert("PROTON_NO_ESYNC".to_string(), "1".to_string());
         env.insert("PROTON_NO_FSYNC".to_string(), "1".to_string());
 
-        // Enable debug output for troubleshooting
-        env.insert("WINEDEBUG".to_string(), "warn+all".to_string());
+        // Disable Wine debug output to prevent OOM from massive log accumulation
+        env.insert("WINEDEBUG".to_string(), "-all".to_string());
 
         // Log all environment variables at trace level
         for (key, value) in &env {
@@ -111,11 +128,13 @@ impl<'a> PrefixBuilder<'a> {
 
     /// Build the prefix from scratch
     pub async fn build(&self) -> Result<()> {
-        info!("Building prefix at {}", self.prefix_path.display());
+        info!("Building prefix at {}", self.base_path.display());
+        info!("Wine prefix (pfx): {}", self.prefix_path.display());
         info!("Using Proton: {}", self.proton.name);
         info!("Wine path: {}", self.get_wine_path().display());
 
-        // Create directory structure
+        // Create directory structure (both base and pfx)
+        std::fs::create_dir_all(&self.base_path)?;
         std::fs::create_dir_all(&self.prefix_path)?;
 
         // Initialize with wineboot
@@ -249,38 +268,27 @@ impl<'a> PrefixBuilder<'a> {
             debug!("Environment: WINE={}", env.get("WINE").unwrap_or(&"".to_string()));
             debug!("Environment: WINEPREFIX={}", env.get("WINEPREFIX").unwrap_or(&"".to_string()));
 
-            // Run winetricks without -q so we can see progress
-            let output = Command::new("winetricks")
+            // Run winetricks with output going directly to terminal (not collected in memory)
+            // This prevents OOM when installing large components like dotnet48
+            let status = Command::new("winetricks")
                 .arg("--force") // Force installation even if already installed
                 .arg(component)
                 .envs(&env)
-                .output()
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit())
+                .status()
                 .await
                 .map_err(|e| WandaError::WinetricksFailed {
                     reason: format!("Failed to run winetricks: {}", e),
                 })?;
 
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-
-            // Log output for debugging
-            if !stdout.is_empty() {
-                for line in stdout.lines().take(20) {
-                    debug!("winetricks: {}", line);
-                }
-                if stdout.lines().count() > 20 {
-                    debug!("winetricks: ... ({} more lines)", stdout.lines().count() - 20);
-                }
-            }
-
-            if !output.status.success() {
+            if !status.success() {
                 error!("winetricks {} failed!", component);
-                error!("stderr: {}", stderr);
                 return Err(WandaError::WinetricksFailed {
                     reason: format!(
                         "winetricks {} failed with exit code {:?}",
                         component,
-                        output.status.code()
+                        status.code()
                     ),
                 });
             }

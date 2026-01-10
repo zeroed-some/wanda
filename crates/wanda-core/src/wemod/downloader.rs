@@ -6,10 +6,17 @@ use futures::StreamExt;
 use std::path::PathBuf;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
-/// WeMod download API endpoint
+/// WeMod download API endpoint (latest version - may not work on Linux)
 const WEMOD_DOWNLOAD_URL: &str = "https://api.wemod.com/client/download";
+
+/// Pinned WeMod version known to work on Linux with Wine/Proton
+/// Version 12.x has known compatibility issues (black window, renderer crashes)
+/// See: https://community.wemod.com/t/wand-wemod-version-12-0-3-on-linux-proton-just-displays-a-black-window/373133
+const WEMOD_LINUX_COMPATIBLE_VERSION: &str = "11.5.0";
+const WEMOD_LINUX_COMPATIBLE_URL: &str =
+    "https://storage-cdn.wemod.com/app/releases/stable/WeMod-11.5.0.exe";
 
 /// Information about a WeMod release
 #[derive(Debug, Clone)]
@@ -42,9 +49,47 @@ impl WemodDownloader {
         }
     }
 
-    /// Get the latest WeMod release info
+    /// Get the Linux-compatible WeMod release info
+    ///
+    /// This returns a pinned version (11.5.0) known to work with Wine/Proton.
+    /// Version 12.x has compatibility issues on Linux (black window, renderer crashes).
     pub async fn get_latest(&self) -> Result<WemodRelease> {
-        info!("Fetching WeMod download info...");
+        info!("Using WeMod {} (pinned for Linux compatibility)", WEMOD_LINUX_COMPATIBLE_VERSION);
+        warn!("WeMod 12.x has known Linux compatibility issues - using 11.5.0 instead");
+
+        // Use the pinned Linux-compatible version instead of fetching latest
+        // The latest 12.x versions have renderer crashes under Wine/Proton
+        let url = WEMOD_LINUX_COMPATIBLE_URL.to_string();
+        let version = Some(WEMOD_LINUX_COMPATIBLE_VERSION.to_string());
+
+        // Get the file size via HEAD request
+        let content_length = self
+            .client
+            .head(&url)
+            .send()
+            .await
+            .ok()
+            .and_then(|r| r.headers().get(reqwest::header::CONTENT_LENGTH).cloned())
+            .and_then(|v| v.to_str().ok().and_then(|s| s.parse().ok()));
+
+        debug!("WeMod download URL: {}", url);
+        debug!("Using pinned version: {}", WEMOD_LINUX_COMPATIBLE_VERSION);
+
+        Ok(WemodRelease {
+            url,
+            version,
+            size: content_length,
+        })
+    }
+
+    /// Get the actual latest WeMod release (may not work on Linux)
+    ///
+    /// WARNING: Version 12.x has known compatibility issues with Wine/Proton
+    /// Use `get_latest()` for Linux-compatible version
+    #[allow(dead_code)]
+    pub async fn get_latest_upstream(&self) -> Result<WemodRelease> {
+        info!("Fetching upstream WeMod download info...");
+        warn!("Latest WeMod may have Linux compatibility issues!");
 
         // The WeMod API redirects to the actual download URL
         // We need to follow the redirect to get the final URL

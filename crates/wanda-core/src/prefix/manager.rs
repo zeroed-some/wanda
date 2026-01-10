@@ -71,9 +71,15 @@ pub struct WandaPrefix {
 }
 
 impl WandaPrefix {
-    /// Get the path to drive_c
+    /// Get the path to the actual Wine prefix (pfx subdirectory)
+    /// Proton stores the Wine prefix in a `pfx` subdirectory
+    pub fn pfx_path(&self) -> PathBuf {
+        self.path.join("pfx")
+    }
+
+    /// Get the path to drive_c (inside the pfx directory)
     pub fn drive_c(&self) -> PathBuf {
-        self.path.join("drive_c")
+        self.pfx_path().join("drive_c")
     }
 
     /// Get the path to the Windows user folder
@@ -82,13 +88,35 @@ impl WandaPrefix {
     }
 
     /// Get the expected WeMod installation path
+    /// Version 12.x uses "Wand" branding, version 11.x uses "WeMod"
     pub fn wemod_path(&self) -> PathBuf {
-        self.user_folder().join("AppData/Local/WeMod")
+        // Check for new "Wand" branding first (version 12.x)
+        let wand_path = self.user_folder().join("AppData/Local/Wand");
+        if wand_path.exists() {
+            return wand_path;
+        }
+
+        // Fall back to old "WeMod" branding (version 11.x)
+        let wemod_path = self.user_folder().join("AppData/Local/WeMod");
+        if wemod_path.exists() {
+            return wemod_path;
+        }
+
+        // Default to WeMod path for new installations (version 11.5.0 is pinned)
+        wemod_path
     }
 
     /// Get the WeMod executable path
     pub fn wemod_exe(&self) -> PathBuf {
         self.wemod_path().join("WeMod.exe")
+    }
+
+    /// Get alternative WeMod paths for checking installation
+    pub fn wemod_paths_all(&self) -> Vec<PathBuf> {
+        vec![
+            self.user_folder().join("AppData/Local/Wand"),
+            self.user_folder().join("AppData/Local/WeMod"),
+        ]
     }
 
     /// Get the system32 directory
@@ -247,9 +275,9 @@ impl PrefixManager {
             issues.push(PrefixIssue::IncompletePrefix);
         }
 
-        // Check for registry files
-        let system_reg = prefix.path.join("system.reg");
-        let user_reg = prefix.path.join("user.reg");
+        // Check for registry files (in the pfx directory)
+        let system_reg = prefix.pfx_path().join("system.reg");
+        let user_reg = prefix.pfx_path().join("user.reg");
         if !system_reg.exists() || !user_reg.exists() {
             issues.push(PrefixIssue::CorruptedRegistry);
         }
