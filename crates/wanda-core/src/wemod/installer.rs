@@ -6,8 +6,13 @@ use crate::steam::ProtonVersion;
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
+use std::time::Duration;
 use tokio::process::Command;
+use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
+
+/// Timeout for WeMod installer (2 minutes should be plenty)
+const INSTALLER_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Handles WeMod installation into Wine prefixes
 pub struct WemodInstaller<'a> {
@@ -108,43 +113,50 @@ impl<'a> WemodInstaller<'a> {
         info!("Using wine: {}", wine);
         info!("Running: {} {}", wine, installer_path.display());
 
-        // WeMod uses Squirrel installer which runs silently by default
-        let output = Command::new(&wine)
+        // WeMod uses Squirrel installer - run with silent flag to avoid GUI interaction
+        // Use inherited stdout/stderr so we can see installer output
+        // Add timeout to prevent indefinite hangs
+        info!("Running installer (timeout: {:?})...", INSTALLER_TIMEOUT);
+
+        let install_future = Command::new(&wine)
             .arg(installer_path)
+            .arg("--silent")  // Squirrel silent install flag
             .envs(&env)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await
-            .map_err(|e| WandaError::WemodInstallFailed {
-                reason: format!("Failed to run installer: {}", e),
-            })?;
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status();
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        if !stdout.is_empty() {
-            debug!("Installer stdout: {}", stdout);
-        }
-
-        if !output.status.success() {
-            error!("WeMod installer exited with status: {:?}", output.status.code());
-            if !stderr.is_empty() {
-                error!("Installer stderr: {}", stderr);
+        match timeout(INSTALLER_TIMEOUT, install_future).await {
+            Ok(Ok(status)) => {
+                if !status.success() {
+                    warn!("WeMod installer exited with status: {:?}", status.code());
+                    warn!("Installation may still have succeeded - checking...");
+                } else {
+                    debug!("Installer completed with success status");
+                }
             }
-            // Don't fail immediately - installer might still have worked
-        } else {
-            debug!("Installer completed with success status");
+            Ok(Err(e)) => {
+                return Err(WandaError::WemodInstallFailed {
+                    reason: format!("Failed to run installer: {}", e),
+                });
+            }
+            Err(_) => {
+                warn!("Installer timed out after {:?}", INSTALLER_TIMEOUT);
+                warn!("Checking if installation succeeded anyway...");
+            }
         }
 
-        // Wait for wineserver using Proton's wineserver
+        // Wait for wineserver using Proton's wineserver (with timeout)
         let wineserver = self.wineserver_exe();
         debug!("Waiting for wineserver: {}", wineserver);
-        let _ = Command::new(&wineserver)
+        let wineserver_wait = Command::new(&wineserver)
             .arg("-w")
             .envs(&env)
-            .status()
-            .await;
+            .status();
+
+        if timeout(Duration::from_secs(30), wineserver_wait).await.is_err() {
+            warn!("Wineserver wait timed out - continuing anyway");
+        }
 
         // Verify installation
         info!("Verifying WeMod installation...");
@@ -309,10 +321,14 @@ impl<'a> WemodInstaller<'a> {
         info!("Using wine: {}", wine);
 
         // Run WeMod with required flags for Wine/Proton compatibility
+        // These Electron flags are necessary for proper rendering under Wine
         let child = Command::new(&wine)
             .arg(&wemod_exe)
-            .arg("--no-sandbox")      // Required for Wine
-            .arg("--disable-gpu")     // Avoid GPU compositor issues
+            .arg("--no-sandbox")              // Required for Wine
+            .arg("--disable-gpu")             // Disable GPU acceleration
+            .arg("--disable-gpu-compositing") // Disable GPU compositing
+            .arg("--disable-software-rasterizer") // Force hardware path (paradoxically helps)
+            .arg("--in-process-gpu")          // Run GPU in main process
             .envs(&env)
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
