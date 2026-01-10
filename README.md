@@ -1,0 +1,2 @@
+# wanda
+(noun) : cosmo??
