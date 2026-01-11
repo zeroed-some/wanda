@@ -320,15 +320,11 @@ impl<'a> WemodInstaller<'a> {
         info!("Starting WeMod from: {}", wemod_exe.display());
         info!("Using wine: {}", wine);
 
-        // Run WeMod with required flags for Wine/Proton compatibility
-        // These Electron flags are necessary for proper rendering under Wine
+        // Run WeMod with minimal flags for Wine/Proton compatibility
+        // Only --no-sandbox is required; additional GPU flags can cause issues
         let child = Command::new(&wine)
             .arg(&wemod_exe)
-            .arg("--no-sandbox")              // Required for Wine
-            .arg("--disable-gpu")             // Disable GPU acceleration
-            .arg("--disable-gpu-compositing") // Disable GPU compositing
-            .arg("--disable-software-rasterizer") // Force hardware path (paradoxically helps)
-            .arg("--in-process-gpu")          // Run GPU in main process
+            .arg("--no-sandbox")  // Required for Electron under Wine
             .envs(&env)
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())

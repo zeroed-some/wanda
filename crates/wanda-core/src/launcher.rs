@@ -1,6 +1,10 @@
 //! Game launching with WeMod
 //!
 //! Handles launching Steam games alongside WeMod through Proton.
+//!
+//! Key insight: WeMod and the game MUST run in the same Wine prefix
+//! for WeMod to be able to hook into the game process. We achieve this by
+//! running both from wanda's prefix (which has .NET and WeMod installed).
 
 use crate::error::{Result, WandaError};
 use crate::prefix::WandaPrefix;
@@ -10,7 +14,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::process::{Child, Command};
-use tracing::{debug, info, warn};
+use tracing::info;
 
 /// Configuration for launching a game
 #[derive(Debug, Clone)]
@@ -54,8 +58,8 @@ impl LaunchHandle {
     pub fn is_running(&mut self) -> bool {
         if let Some(ref mut wemod) = self.wemod_process {
             match wemod.try_wait() {
-                Ok(Some(_)) => return false, // WeMod exited
-                Ok(None) => return true,     // Still running
+                Ok(Some(_)) => return false,
+                Ok(None) => return true,
                 Err(_) => return false,
             }
         }
@@ -86,11 +90,8 @@ impl LaunchHandle {
 
 /// Game launcher that coordinates WeMod and game startup
 pub struct GameLauncher<'a> {
-    /// Steam installation
     steam: &'a SteamInstallation,
-    /// WANDA prefix with WeMod
     prefix: &'a WandaPrefix,
-    /// Proton version to use
     proton: &'a ProtonVersion,
 }
 
@@ -101,42 +102,27 @@ impl<'a> GameLauncher<'a> {
         prefix: &'a WandaPrefix,
         proton: &'a ProtonVersion,
     ) -> Self {
-        Self {
-            steam,
-            prefix,
-            proton,
-        }
+        Self { steam, prefix, proton }
     }
 
     /// Build environment variables for launching
-    fn build_env(&self, game: &SteamApp) -> HashMap<String, String> {
+    fn build_env(&self) -> HashMap<String, String> {
         let mut env = HashMap::new();
 
-        // Wine prefix (WANDA's prefix for WeMod)
         env.insert(
             "WINEPREFIX".to_string(),
+            self.prefix.pfx_path().to_string_lossy().to_string(),
+        );
+        env.insert(
+            "STEAM_COMPAT_DATA_PATH".to_string(),
             self.prefix.path.to_string_lossy().to_string(),
         );
-
-        // Steam compatibility data path (for the game's own prefix if needed)
-        if let Some(ref compat_path) = game.compat_data_path {
-            env.insert(
-                "STEAM_COMPAT_DATA_PATH".to_string(),
-                compat_path.to_string_lossy().to_string(),
-            );
-        }
-
-        // Steam client install path
         env.insert(
             "STEAM_COMPAT_CLIENT_INSTALL_PATH".to_string(),
             self.steam.root_path.to_string_lossy().to_string(),
         );
-
-        // Proton flags that may help stability
         env.insert("PROTON_NO_ESYNC".to_string(), "1".to_string());
         env.insert("PROTON_NO_FSYNC".to_string(), "1".to_string());
-
-        // Reduce Wine debug noise
         env.insert("WINEDEBUG".to_string(), "-all".to_string());
 
         env
@@ -157,28 +143,30 @@ impl<'a> GameLauncher<'a> {
         let game = self
             .steam
             .find_game(config.app_id)
-            .ok_or(WandaError::GameNotFound {
-                app_id: config.app_id,
-            })?;
+            .ok_or(WandaError::GameNotFound { app_id: config.app_id })?;
 
         info!(
             "Launching {} (AppID: {}) {}",
             game.name,
             game.app_id,
-            if config.with_wemod {
-                "with WeMod"
-            } else {
-                "without WeMod"
-            }
+            if config.with_wemod { "with WeMod" } else { "without WeMod" }
         );
 
-        let mut env = self.build_env(game);
+        info!("Using WANDA prefix: {}", self.prefix.path.display());
+
+        // Kill stale wineservers to avoid conflicts
+        info!("Cleaning up stale wineservers...");
+        let _ = Command::new("pkill").args(["-9", "wineserver"]).output().await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let mut env = self.build_env();
+        env.insert("SteamAppId".to_string(), config.app_id.to_string());
+        env.insert("SteamGameId".to_string(), config.app_id.to_string());
         env.extend(config.extra_env);
 
         let wine = self.wine_exe();
         let mut wemod_process = None;
 
-        // Start WeMod first if requested
         if config.with_wemod {
             let wemod_exe = self.prefix.wemod_exe();
             if !wemod_exe.exists() {
@@ -186,11 +174,14 @@ impl<'a> GameLauncher<'a> {
             }
 
             info!("Starting WeMod...");
+            info!("WeMod path: {}", wemod_exe.display());
+
             let child = Command::new(&wine)
                 .arg(&wemod_exe)
+                .arg("--no-sandbox")
                 .envs(&env)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
                 .spawn()
                 .map_err(|e| WandaError::LaunchFailed {
                     reason: format!("Failed to start WeMod: {}", e),
@@ -198,18 +189,12 @@ impl<'a> GameLauncher<'a> {
 
             wemod_process = Some(child);
 
-            // Wait for WeMod to initialize
-            info!(
-                "Waiting {} seconds for WeMod to initialize...",
-                config.wemod_delay
-            );
+            info!("Waiting {} seconds for WeMod to initialize...", config.wemod_delay);
             tokio::time::sleep(Duration::from_secs(config.wemod_delay)).await;
         }
 
-        // Launch the game via Steam
-        // Using steam:// URL protocol ensures Steam handles Proton setup correctly
-        info!("Launching game via Steam...");
-        self.launch_via_steam(config.app_id).await?;
+        info!("Launching game via Proton...");
+        self.launch_game_via_proton(&game, &config.extra_args, &env).await?;
 
         Ok(LaunchHandle {
             wemod_process,
@@ -218,97 +203,42 @@ impl<'a> GameLauncher<'a> {
         })
     }
 
-    /// Launch a game via Steam's URL protocol
-    async fn launch_via_steam(&self, app_id: u32) -> Result<()> {
-        // Use xdg-open to launch via steam:// protocol
-        // This ensures Steam handles all the Proton setup correctly
-        let steam_url = format!("steam://rungameid/{}", app_id);
-
-        let status = Command::new("xdg-open")
-            .arg(&steam_url)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await
-            .map_err(|e| WandaError::LaunchFailed {
-                reason: format!("Failed to launch Steam URL: {}", e),
-            })?;
-
-        if !status.success() {
-            // Try alternative: steam command directly
-            let status = Command::new("steam")
-                .arg(&steam_url)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .await
-                .map_err(|e| WandaError::LaunchFailed {
-                    reason: format!("Failed to launch via steam command: {}", e),
-                })?;
-
-            if !status.success() {
-                warn!("Steam launch returned non-zero, game may still start");
-            }
-        }
-
-        debug!("Game launch initiated via Steam");
-        Ok(())
-    }
-
-    /// Launch a game directly via Proton (without Steam)
-    /// This is an alternative method that gives more control
-    #[allow(dead_code)]
-    async fn launch_directly(&self, game: &SteamApp, args: &[String]) -> Result<Child> {
+    /// Launch game via Proton
+    async fn launch_game_via_proton(
+        &self,
+        game: &SteamApp,
+        args: &[String],
+        env: &HashMap<String, String>,
+    ) -> Result<()> {
         let proton_exe = self.proton.proton_exe();
-
         if !proton_exe.exists() {
             return Err(WandaError::ProtonNotFound);
         }
 
-        // Find the game executable
         let game_exe = self.find_game_executable(game)?;
-
-        let mut env = self.build_env(game);
-
-        // Set up Proton environment
-        env.insert("STEAM_COMPAT_DATA_PATH".to_string(),
-            game.compat_data_path
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|| {
-                    self.steam.root_path
-                        .join("steamapps/compatdata")
-                        .join(game.app_id.to_string())
-                        .to_string_lossy()
-                        .to_string()
-                })
-        );
+        info!("Game executable: {}", game_exe.display());
 
         let mut cmd = Command::new(&proton_exe);
-        cmd.arg("run").arg(&game_exe);
-        cmd.args(args);
-        cmd.envs(&env);
-        cmd.stdout(Stdio::null());
-        cmd.stderr(Stdio::null());
+        cmd.arg("run").arg(&game_exe).args(args).envs(env);
+        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
 
-        let child = cmd.spawn().map_err(|e| WandaError::LaunchFailed {
+        info!("Running: {} run {}", proton_exe.display(), game_exe.display());
+
+        cmd.spawn().map_err(|e| WandaError::LaunchFailed {
             reason: format!("Failed to start game: {}", e),
         })?;
 
-        Ok(child)
+        Ok(())
     }
 
-    /// Try to find the main executable for a game
+    /// Find the main executable for a game
     fn find_game_executable(&self, game: &SteamApp) -> Result<PathBuf> {
         let install_path = &game.install_path;
 
         if !install_path.exists() {
-            return Err(WandaError::GameNotFound {
-                app_id: game.app_id,
-            });
+            return Err(WandaError::GameNotFound { app_id: game.app_id });
         }
 
-        // Common executable patterns
         let patterns = [
             format!("{}.exe", game.install_dir),
             "game.exe".to_string(),
@@ -316,7 +246,6 @@ impl<'a> GameLauncher<'a> {
             "launcher.exe".to_string(),
         ];
 
-        // Try to find a matching executable
         for pattern in &patterns {
             let exe_path = install_path.join(pattern);
             if exe_path.exists() {
@@ -324,7 +253,6 @@ impl<'a> GameLauncher<'a> {
             }
         }
 
-        // Walk the directory looking for .exe files
         for entry in walkdir::WalkDir::new(install_path)
             .max_depth(2)
             .into_iter()
@@ -334,7 +262,6 @@ impl<'a> GameLauncher<'a> {
             if let Some(ext) = path.extension() {
                 if ext == "exe" {
                     let name = path.file_name().unwrap_or_default().to_string_lossy();
-                    // Skip common non-game executables
                     if !name.to_lowercase().contains("unins")
                         && !name.to_lowercase().contains("redist")
                         && !name.to_lowercase().contains("setup")

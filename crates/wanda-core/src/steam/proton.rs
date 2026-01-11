@@ -208,19 +208,25 @@ impl ProtonManager {
         is_ge: bool,
         is_experimental: bool,
     ) -> ProtonCompatibility {
-        // GE-Proton 8+ is recommended for WeMod
-        if is_ge && version.0 >= 8 {
+        // Proton Experimental is recommended for WeMod
+        // GE-Proton 10.x has wow64 mode issues that cause WeMod to crash
+        if is_experimental {
             return ProtonCompatibility::Recommended;
         }
 
-        // GE-Proton 7.x should work
-        if is_ge && version.0 >= 7 {
+        // GE-Proton 9.x and below should work (before wow64 mode)
+        if is_ge && version.0 >= 8 && version.0 <= 9 {
             return ProtonCompatibility::Supported;
         }
 
-        // Proton Experimental might work
-        if is_experimental {
+        // GE-Proton 10.x has known wow64 issues with WeMod
+        if is_ge && version.0 >= 10 {
             return ProtonCompatibility::Experimental;
+        }
+
+        // GE-Proton 7.x might work
+        if is_ge && version.0 >= 7 {
+            return ProtonCompatibility::Supported;
         }
 
         // Standard Proton 8+ should work
@@ -315,9 +321,20 @@ mod tests {
 
     #[test]
     fn test_compatibility() {
+        // Proton Experimental is now recommended (GE-Proton 10.x has wow64 issues)
+        let compat =
+            ProtonManager::determine_compatibility("Proton - Experimental", (0, 0, 0), false, true);
+        assert_eq!(compat, ProtonCompatibility::Recommended);
+
+        // GE-Proton 9.x is supported (before wow64 issues)
         let compat =
             ProtonManager::determine_compatibility("GE-Proton9-5", (9, 5, 0), true, false);
-        assert_eq!(compat, ProtonCompatibility::Recommended);
+        assert_eq!(compat, ProtonCompatibility::Supported);
+
+        // GE-Proton 10.x is experimental (wow64 issues)
+        let compat =
+            ProtonManager::determine_compatibility("GE-Proton10-28", (10, 28, 0), true, false);
+        assert_eq!(compat, ProtonCompatibility::Experimental);
 
         let compat =
             ProtonManager::determine_compatibility("Proton 6.0", (6, 0, 0), false, false);

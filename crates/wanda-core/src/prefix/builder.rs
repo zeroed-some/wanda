@@ -236,8 +236,11 @@ impl<'a> PrefixBuilder<'a> {
     async fn install_dependencies(&self) -> Result<()> {
         info!("Installing additional dependencies...");
 
-        // Install common dependencies WeMod might need
-        let deps = ["vcrun2019", "corefonts"];
+        // Install common dependencies WeMod needs
+        // - vcrun2019: Visual C++ runtime
+        // - corefonts: Windows fonts
+        // - winhttp/wininet: Network components for WeMod authentication
+        let deps = ["vcrun2019", "corefonts", "winhttp", "wininet"];
 
         for dep in deps {
             info!("Installing {}...", dep);
