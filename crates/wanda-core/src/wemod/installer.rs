@@ -45,6 +45,22 @@ impl<'a> WemodInstaller<'a> {
         env.insert("PROTON_NO_ESYNC".to_string(), "1".to_string());
         env.insert("PROTON_NO_FSYNC".to_string(), "1".to_string());
 
+        // Pass display variables for GUI (required for WeMod installer)
+        if let Ok(disp) = std::env::var("DISPLAY") {
+            info!("Captured DISPLAY={}", disp);
+            env.insert("DISPLAY".to_string(), disp);
+        } else {
+            warn!("DISPLAY not set in environment!");
+        }
+        if let Ok(wayland_disp) = std::env::var("WAYLAND_DISPLAY") {
+            info!("Captured WAYLAND_DISPLAY={}", wayland_disp);
+            env.insert("WAYLAND_DISPLAY".to_string(), wayland_disp);
+        }
+        if let Ok(xdg_dir) = std::env::var("XDG_RUNTIME_DIR") {
+            info!("Captured XDG_RUNTIME_DIR={}", xdg_dir);
+            env.insert("XDG_RUNTIME_DIR".to_string(), xdg_dir);
+        }
+
         // Set Proton lib paths for finding dependencies
         let proton_lib64 = self.proton.path.join("files/lib64");
         let proton_lib = self.proton.path.join("files/lib");

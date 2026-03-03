@@ -14,9 +14,10 @@ const WEMOD_DOWNLOAD_URL: &str = "https://api.wemod.com/client/download";
 /// Pinned WeMod version known to work on Linux with Wine/Proton
 /// Version 12.x has known compatibility issues (black window, renderer crashes)
 /// See: https://community.wemod.com/t/wand-wemod-version-12-0-3-on-linux-proton-just-displays-a-black-window/373133
-const WEMOD_LINUX_COMPATIBLE_VERSION: &str = "11.5.0";
+/// Using 11.6.0 as it matches wemod-launcher and has better Cloudflare verification support
+const WEMOD_LINUX_COMPATIBLE_VERSION: &str = "11.6.0";
 const WEMOD_LINUX_COMPATIBLE_URL: &str =
-    "https://storage-cdn.wemod.com/app/releases/stable/WeMod-11.5.0.exe";
+    "https://storage-cdn.wemod.com/app/releases/stable/WeMod-11.6.0.exe";
 
 /// Information about a WeMod release
 #[derive(Debug, Clone)]
