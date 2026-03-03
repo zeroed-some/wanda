@@ -106,9 +106,37 @@ impl WandaPrefix {
         wemod_path
     }
 
-    /// Get the WeMod executable path
+    /// Get the WeMod executable path (Squirrel stub)
     pub fn wemod_exe(&self) -> PathBuf {
         self.wemod_path().join("WeMod.exe")
+    }
+
+    /// Get the real WeMod executable inside the versioned app directory
+    ///
+    /// WeMod uses Squirrel for updates. The root WeMod.exe is a small stub
+    /// that spawns the real Electron app from `app-{version}/WeMod.exe` and
+    /// exits. For standalone mode we need the real exe so Proton keeps the
+    /// Wine session alive.
+    pub fn wemod_app_exe(&self) -> Option<PathBuf> {
+        let wemod_dir = self.wemod_path();
+        let mut best: Option<(String, PathBuf)> = None;
+
+        if let Ok(entries) = std::fs::read_dir(&wemod_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with("app-") && entry.path().is_dir() {
+                    let exe = entry.path().join("WeMod.exe");
+                    if exe.exists() {
+                        // Pick the highest version directory
+                        if best.as_ref().map_or(true, |(v, _)| name > *v) {
+                            best = Some((name, exe));
+                        }
+                    }
+                }
+            }
+        }
+
+        best.map(|(_, path)| path)
     }
 
     /// Get alternative WeMod paths for checking installation
