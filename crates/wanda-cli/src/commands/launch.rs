@@ -31,6 +31,14 @@ pub struct LaunchArgs {
     /// Wait for the game to exit
     #[arg(long, short)]
     wait: bool,
+
+    /// Standalone mode: launch WeMod only, start the game from WeMod's UI
+    #[arg(long)]
+    standalone: bool,
+
+    /// Specify Proton version to use (overrides config)
+    #[arg(long)]
+    proton: Option<String>,
 }
 
 pub async fn run(args: LaunchArgs, config_path: Option<PathBuf>) -> Result<()> {
@@ -90,18 +98,92 @@ pub async fn run(args: LaunchArgs, config_path: Option<PathBuf>) -> Result<()> {
             return Err(WandaError::WemodNotInstalled);
         }
 
+        // In standalone mode, use the GAME's compat data prefix instead
+        // of wanda's prefix. This ensures WeMod and the game share the
+        // same wineserver. WeMod's files are symlinked from wanda's
+        // prefix into the game's prefix.
+        let game_prefix;
+        let launch_prefix = if args.standalone {
+            let compat_data = game.compat_data_path.as_ref().ok_or_else(|| {
+                WandaError::LaunchFailed {
+                    reason: format!(
+                        "Game '{}' has no Proton compat data. Has it been launched with Proton before?",
+                        game.name
+                    ),
+                }
+            })?;
+
+            println!(
+                "  Using game prefix: {}",
+                style(compat_data.display()).dim()
+            );
+
+            // Symlink WeMod into the game's prefix
+            let wemod_src = prefix.wemod_path();
+            let target_local = compat_data.join("pfx/drive_c/users/steamuser/AppData/Local");
+            let _ = std::fs::create_dir_all(&target_local);
+            let wemod_dir_name = wemod_src.file_name().unwrap_or_default();
+            let link_path = target_local.join(wemod_dir_name);
+            if !link_path.exists() {
+                let _ = std::os::unix::fs::symlink(&wemod_src, &link_path);
+            }
+
+            // Symlink WeMod roaming data
+            let roaming_src = prefix.path.join("pfx/drive_c/users/steamuser/AppData/Roaming/WeMod");
+            if roaming_src.exists() {
+                let target_roaming = compat_data.join("pfx/drive_c/users/steamuser/AppData/Roaming");
+                let _ = std::fs::create_dir_all(&target_roaming);
+                let roaming_link = target_roaming.join("WeMod");
+                if !roaming_link.exists() {
+                    let _ = std::os::unix::fs::symlink(&roaming_src, &roaming_link);
+                }
+            }
+
+            // Patch mscorlib in the game's prefix
+            // (done by the launcher's setup_steam_library, but mscorlib
+            // needs manual patching here)
+
+            // Create a WandaPrefix pointing to the game's compat data
+            game_prefix = wanda_core::prefix::WandaPrefix {
+                name: "game".to_string(),
+                path: compat_data.clone(),
+                wemod_installed: true,
+                wemod_version: prefix.wemod_version.clone(),
+                proton_version: prefix.proton_version.clone(),
+                created_at: None,
+                last_used: None,
+            };
+            &game_prefix
+        } else {
+            prefix
+        };
+
         // Get Proton version
         let proton_manager = ProtonManager::discover(&steam, &config)?;
-        let proton = proton_manager.get_preferred(&config)?;
+        let proton = if let Some(ref name) = args.proton {
+            proton_manager.find_by_name(name).ok_or_else(|| {
+                eprintln!("Available Proton versions:");
+                for v in &proton_manager.versions {
+                    eprintln!("  - {} ({})", v.name, v.compatibility);
+                }
+                WandaError::LaunchFailed {
+                    reason: format!("Proton version '{}' not found", name),
+                }
+            })?
+        } else {
+            proton_manager.get_preferred(&config)?
+        };
 
         println!("  Using WeMod with {}", proton.name);
 
         // Create launcher
-        let launcher = GameLauncher::new(&steam, prefix, proton);
+        let launcher = GameLauncher::new(&steam, launch_prefix, proton);
 
+        let standalone = args.standalone;
         let launch_config = LaunchConfig {
             app_id: game.app_id,
             with_wemod: true,
+            standalone,
             wemod_delay: args.delay,
             extra_args: args
                 .args
@@ -112,12 +194,22 @@ pub async fn run(args: LaunchArgs, config_path: Option<PathBuf>) -> Result<()> {
 
         let mut handle = launcher.launch(launch_config).await?;
 
-        println!(
-            "\n{} Game launched with WeMod!",
-            style("SUCCESS").green().bold()
-        );
-        println!("\nWeMod should appear in a separate window.");
-        println!("Select your game in WeMod and click Play to activate trainers.\n");
+        if standalone {
+            println!(
+                "\n{} WeMod launched in standalone mode!",
+                style("SUCCESS").green().bold()
+            );
+            println!("\nWeMod is running in the game's prefix.");
+            println!("Find your game in WeMod and click Play.");
+            println!("WeMod will launch the game directly.\n");
+        } else {
+            println!(
+                "\n{} Game launched with WeMod!",
+                style("SUCCESS").green().bold()
+            );
+            println!("\nWeMod should appear in a separate window.");
+            println!("Select your game in WeMod and click Play to activate trainers.\n");
+        }
 
         if args.wait {
             println!("Waiting for session to end...");
