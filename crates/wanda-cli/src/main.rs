@@ -57,6 +57,14 @@ enum Commands {
 
     /// Diagnose issues and generate reports
     Doctor(commands::doctor::DoctorArgs),
+
+    /// Kill stale Wine/WeMod processes
+    Cleanup(commands::cleanup::CleanupArgs),
+
+    /// Steam launch option wrapper — injects WeMod into the game's Proton session
+    ///
+    /// Set Steam launch options to: wanda inject %command%
+    Inject(commands::inject::InjectArgs),
 }
 
 fn setup_logging(verbose: u8, quiet: bool) {
@@ -92,6 +100,8 @@ async fn main() {
         Commands::Wemod(cmd) => commands::wemod::run(cmd, cli.config).await,
         Commands::Config(cmd) => commands::config::run(cmd, cli.config).await,
         Commands::Doctor(args) => commands::doctor::run(args, cli.config).await,
+        Commands::Cleanup(args) => commands::cleanup::run(args, cli.config).await,
+        Commands::Inject(args) => commands::inject::run(args, cli.config).await,
     };
 
     if let Err(e) = result {
