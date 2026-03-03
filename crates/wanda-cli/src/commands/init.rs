@@ -5,8 +5,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
 use wanda_core::{
     config::WandaConfig,
-    prefix::PrefixManager,
-    steam::{ProtonManager, SteamInstallation},
+    prefix::{PrefixBuilder, PrefixManager},
+    steam::{ProtonCompatibility, ProtonManager, SteamInstallation},
     wemod::{WemodDownloader, WemodInstaller},
     Result, WandaError,
 };
@@ -24,6 +24,10 @@ pub struct InitArgs {
     /// Skip WeMod installation
     #[arg(long)]
     skip_wemod: bool,
+
+    /// Skip .NET Framework installation (WeMod needs it for trainers)
+    #[arg(long)]
+    skip_dotnet: bool,
 
     /// Force reinitialization even if already set up
     #[arg(long, short)]
@@ -66,19 +70,44 @@ pub async fn run(args: InitArgs, config_path: Option<PathBuf>) -> Result<()> {
     }
 
     // Select Proton version
+    // Priority: 1) --proton arg, 2) config preferred_version, 3) get_recommended()
+    // Experimental/Unsupported versions from config are auto-overridden unless --proton is explicit
     let proton = if let Some(ref name) = args.proton {
-        proton_manager.find_by_name(name).ok_or_else(|| {
+        let v = proton_manager.find_by_name(name).ok_or_else(|| {
             eprintln!("Available Proton versions:");
             for v in &proton_manager.versions {
-                eprintln!("  - {}", v.name);
+                eprintln!("  - {} ({})", v.name, v.compatibility);
             }
             WandaError::ProtonNotFound
-        })?
+        })?;
+        if matches!(v.compatibility, ProtonCompatibility::Experimental | ProtonCompatibility::Unsupported) {
+            eprintln!(
+                "  Warning: '{}' is {} — this may cause WeMod to fail",
+                v.name, v.compatibility
+            );
+        }
+        v
+    } else if let Some(ref preferred) = config.proton.preferred_version {
+        match proton_manager.find_by_name(preferred) {
+            Some(v) if matches!(v.compatibility, ProtonCompatibility::Experimental | ProtonCompatibility::Unsupported) => {
+                let recommended = proton_manager.get_recommended().ok_or(WandaError::ProtonNotFound)?;
+                eprintln!(
+                    "  Configured Proton '{}' is {} — auto-switching to '{}' ({})",
+                    v.name, v.compatibility, recommended.name, recommended.compatibility
+                );
+                recommended
+            }
+            Some(v) => v,
+            None => {
+                eprintln!("  Configured Proton '{}' not found, using recommended", preferred);
+                proton_manager.get_recommended().ok_or(WandaError::ProtonNotFound)?
+            }
+        }
     } else {
         proton_manager.get_recommended().ok_or(WandaError::ProtonNotFound)?
     };
 
-    println!("  Using: {} ({:?})", proton.name, proton.compatibility);
+    println!("  Using: {} ({})", proton.name, proton.compatibility);
 
     // Set up prefix
     println!("\nSetting up Wine prefix...");
@@ -107,6 +136,36 @@ pub async fn run(args: InitArgs, config_path: Option<PathBuf>) -> Result<()> {
         prefix_manager.create("default", proton).await?;
 
         pb.finish_with_message("Prefix created successfully");
+    }
+
+    // Install .NET Framework 4.8 (required by WeMod's trainer engine)
+    if !args.skip_dotnet {
+        println!("\nInstalling .NET Framework 4.8...");
+        println!("  This may take 10-15 minutes. Use --skip-dotnet to skip.");
+
+        let prefix_path = prefix_manager.base_path.join("default");
+        let dotnet_builder = PrefixBuilder::new(&prefix_path, proton);
+
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.green} {msg}")
+                .unwrap(),
+        );
+        pb.set_message("Installing .NET Framework 4.8 via winetricks...");
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+
+        match dotnet_builder.install_dotnet().await {
+            Ok(_) => {
+                pb.finish_with_message(".NET Framework installed successfully");
+            }
+            Err(e) => {
+                pb.finish_with_message(".NET Framework installation failed");
+                eprintln!("  Warning: .NET install failed: {}", e);
+                eprintln!("  WeMod may show a '.NET framework' error on startup.");
+                eprintln!("  You can retry manually: winetricks -q dotnet48");
+            }
+        }
     }
 
     // Reload prefix after creation
