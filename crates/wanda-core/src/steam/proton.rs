@@ -4,6 +4,7 @@ use crate::config::WandaConfig;
 use crate::error::{Result, WandaError};
 use crate::steam::SteamInstallation;
 use std::cmp::Ordering;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
@@ -18,6 +19,17 @@ pub enum ProtonCompatibility {
     Experimental,
     /// Known to have issues
     Unsupported,
+}
+
+impl fmt::Display for ProtonCompatibility {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ProtonCompatibility::Recommended => write!(f, "Recommended"),
+            ProtonCompatibility::Supported => write!(f, "Supported"),
+            ProtonCompatibility::Experimental => write!(f, "Experimental"),
+            ProtonCompatibility::Unsupported => write!(f, "Unsupported"),
+        }
+    }
 }
 
 /// A detected Proton installation
@@ -286,11 +298,32 @@ impl ProtonManager {
         // Check user preference first
         if let Some(ref preferred) = config.proton.preferred_version {
             if let Some(v) = self.find_by_name(preferred) {
-                if v.compatibility == ProtonCompatibility::Unsupported {
-                    warn!(
-                        "Preferred Proton version {} has known compatibility issues",
-                        v.name
-                    );
+                match v.compatibility {
+                    ProtonCompatibility::Unsupported => {
+                        warn!(
+                            "Preferred Proton version '{}' is {} — it has known compatibility issues with WeMod",
+                            v.name, v.compatibility
+                        );
+                        if let Some(rec) = self.get_recommended() {
+                            warn!(
+                                "Consider switching to '{}' ({}): wanda init --proton '{}'",
+                                rec.name, rec.compatibility, rec.name
+                            );
+                        }
+                    }
+                    ProtonCompatibility::Experimental => {
+                        warn!(
+                            "Preferred Proton version '{}' is {} — GE-Proton 10.x wow64 mode can break WeMod's renderer",
+                            v.name, v.compatibility
+                        );
+                        if let Some(rec) = self.get_recommended() {
+                            warn!(
+                                "Consider switching to '{}' ({}): wanda init --proton '{}'",
+                                rec.name, rec.compatibility, rec.name
+                            );
+                        }
+                    }
+                    _ => {}
                 }
                 return Ok(v);
             }
