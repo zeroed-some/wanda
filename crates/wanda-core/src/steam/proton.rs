@@ -55,9 +55,18 @@ impl ProtonVersion {
         self.path.join("proton")
     }
 
-    /// Get the path to the Wine binary
+    /// Get the path to the Wine binary.
+    ///
+    /// Older Proton ships a separate `wine64`; newer builds (Proton
+    /// Experimental, GE-Proton 10+) use a single unified wow64 `wine`
+    /// binary and drop `wine64` entirely. Prefer `wine64` when present,
+    /// otherwise fall back to `wine`.
     pub fn wine_exe(&self) -> PathBuf {
-        self.path.join("files/bin/wine64")
+        let wine64 = self.path.join("files/bin/wine64");
+        if wine64.exists() {
+            return wine64;
+        }
+        self.path.join("files/bin/wine")
     }
 }
 
