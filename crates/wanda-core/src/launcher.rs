@@ -26,6 +26,19 @@ fn log_file_path() -> PathBuf {
         .join("wanda.log")
 }
 
+/// Wrap a shell command so its combined stdout+stderr is written to both the
+/// terminal and `wanda.log`. This captures Wine/DXVK errors, crash backtraces,
+/// and game/WeMod output that would otherwise only flash past in the terminal,
+/// so a failed launch leaves a diagnosable trail in the log file.
+fn tee_to_log(cmd: &str) -> String {
+    let log_path = log_file_path();
+    // Single-quote the path for the shell; escape any embedded single quotes.
+    let quoted = format!("'{}'", log_path.to_string_lossy().replace('\'', r"'\''"));
+    // Group the command so the pipe applies to the whole thing. `tee -a`
+    // appends; stderr is merged into stdout first.
+    format!("{{ {cmd} ; }} 2>&1 | tee -a {quoted}")
+}
+
 /// Log a message to file
 fn log_to_file(msg: &str) {
     let log_path = log_file_path();
@@ -725,7 +738,7 @@ start "" "{game_path}"
 
             let child = Command::new("bash")
                 .arg("-c")
-                .arg(&cmd_str)
+                .arg(tee_to_log(&cmd_str))
                 .envs(&env)
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
@@ -755,7 +768,7 @@ start "" "{game_path}"
 
             let child = Command::new("bash")
                 .arg("-c")
-                .arg(&cmd_str)
+                .arg(tee_to_log(&cmd_str))
                 .envs(&env)
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
