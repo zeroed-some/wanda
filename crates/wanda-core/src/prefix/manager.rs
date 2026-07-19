@@ -139,27 +139,44 @@ impl WandaPrefix {
         self.wemod_path().join("WeMod.exe")
     }
 
-    /// Get the real WeMod executable inside the versioned app directory
+    /// Get the real WeMod executable inside the versioned app directory.
     ///
     /// WeMod uses Squirrel for updates. The root WeMod.exe is a small stub
     /// that spawns the real Electron app from `app-{version}/WeMod.exe` and
-    /// exits. For standalone mode we need the real exe so Proton keeps the
-    /// Wine session alive.
+    /// exits. We launch the real exe directly so Proton keeps the Wine
+    /// session alive.
+    ///
+    /// WeMod auto-updates itself on launch, so a prefix that was seeded with
+    /// the pinned 11.x can end up with a newer `app-12.x` directory too.
+    /// WeMod 12+ renders a black window under Wine (the whole reason the
+    /// download is pinned), so we skip 12+ and pick the highest version below
+    /// that. Returns None if only incompatible versions are installed.
     pub fn wemod_app_exe(&self) -> Option<PathBuf> {
+        const MAX_COMPATIBLE_MAJOR: u32 = 11;
+
         let wemod_dir = self.wemod_path();
-        let mut best: Option<(String, PathBuf)> = None;
+        let mut best: Option<((u32, u32, u32), PathBuf)> = None;
 
         if let Ok(entries) = std::fs::read_dir(&wemod_dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with("app-") && entry.path().is_dir() {
-                    let exe = entry.path().join("WeMod.exe");
-                    if exe.exists() {
-                        // Pick the highest version directory
-                        if best.as_ref().map_or(true, |(v, _)| name > *v) {
-                            best = Some((name, exe));
-                        }
-                    }
+                let version_str = match name.strip_prefix("app-") {
+                    Some(v) => v,
+                    None => continue,
+                };
+                if !entry.path().is_dir() {
+                    continue;
+                }
+
+                let version = parse_app_version(version_str);
+                // Skip WeMod 12+ — black window / renderer crashes under Wine.
+                if version.0 > MAX_COMPATIBLE_MAJOR {
+                    continue;
+                }
+
+                let exe = entry.path().join("WeMod.exe");
+                if exe.exists() && best.as_ref().map_or(true, |(v, _)| version > *v) {
+                    best = Some((version, exe));
                 }
             }
         }
@@ -433,6 +450,18 @@ impl PrefixManager {
         }
         Ok(())
     }
+}
+
+/// Parse a WeMod app version string like "12.40.0" into a (major, minor,
+/// patch) tuple for numeric comparison. Missing or non-numeric components
+/// default to 0.
+fn parse_app_version(s: &str) -> (u32, u32, u32) {
+    let mut parts = s.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+    (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    )
 }
 
 /// Get current timestamp as ISO string (simple implementation)
