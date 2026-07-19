@@ -87,23 +87,51 @@ impl WandaPrefix {
         self.drive_c().join("users/steamuser")
     }
 
-    /// Get the expected WeMod installation path
-    /// Version 12.x uses "Wand" branding, version 11.x uses "WeMod"
+    /// Get the WeMod installation path.
+    ///
+    /// Version 12.x uses "Wand" branding, version 11.x uses "WeMod". We can't
+    /// just return the first branded directory that exists: WeMod 11.6 creates
+    /// an empty `AppData/Local/Wand` directory for logs while installing the
+    /// actual app under `AppData/Local/WeMod`. So prefer whichever directory
+    /// actually contains a WeMod install (root stub or `app-*/WeMod.exe`), and
+    /// only fall back to a bare-existing directory if neither looks installed.
     pub fn wemod_path(&self) -> PathBuf {
-        // Check for new "Wand" branding first (version 12.x)
         let wand_path = self.user_folder().join("AppData/Local/Wand");
-        if wand_path.exists() {
+        let wemod_path = self.user_folder().join("AppData/Local/WeMod");
+
+        if Self::is_wemod_install_dir(&wand_path) {
             return wand_path;
         }
-
-        // Fall back to old "WeMod" branding (version 11.x)
-        let wemod_path = self.user_folder().join("AppData/Local/WeMod");
-        if wemod_path.exists() {
+        if Self::is_wemod_install_dir(&wemod_path) {
             return wemod_path;
         }
 
-        // Default to WeMod path for new installations (version 11.5.0 is pinned)
+        // Neither holds a real install — return whichever exists (Wand first
+        // for v12 branding), else default to the WeMod path for fresh installs.
+        if wand_path.exists() {
+            return wand_path;
+        }
+        if wemod_path.exists() {
+            return wemod_path;
+        }
         wemod_path
+    }
+
+    /// Whether a directory holds a WeMod install: a root `WeMod.exe` (Squirrel
+    /// stub) or a versioned `app-*/WeMod.exe`.
+    fn is_wemod_install_dir(dir: &Path) -> bool {
+        if dir.join("WeMod.exe").exists() {
+            return true;
+        }
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with("app-") && entry.path().join("WeMod.exe").exists() {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Get the WeMod executable path (Squirrel stub)
