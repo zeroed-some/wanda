@@ -189,6 +189,36 @@ Paths used:
 
 ---
 
+## Known limitation: WeMod trainers need real .NET Framework
+
+WeMod's UI is Electron (works under Wine once GPU compositing is disabled — WANDA
+passes `--disable-gpu --disable-gpu-compositing --disable-direct-composition`), but its
+**trainer engine** (`WeModAuxiliaryService.exe`) is a **.NET Framework** app that requires
+a real Microsoft .NET runtime (≥ 4.7.2556). Wine Mono is **not** sufficient — the auxiliary
+process exits with code `0xC8` and WeMod shows "failed to load".
+
+WANDA patches `mscorlib.dll` so WeMod's *version check* passes, but that only masks the
+missing runtime. You need **real .NET 4.8** (or 4.7.2) actually installed in the prefix, and
+that install is fragile on modern Wine. Observed failure modes:
+
+- **Proton Experimental (wine-11, wow64):** the .NET installer's MSI cabinet extraction fails
+  (`err:msi:extract_cabinet FDICopy failed` on `netfx_core.mzz`) — real .NET won't install.
+- **GE-Proton 9 (wine-9):** `winetricks dotnet48/dotnet472` deadlocks on the Wine-Mono
+  *uninstall* step (`msiexec /x{…}` blocked in `anon_pipe_read`); even after killing the stuck
+  uninstall, the dependency chain wedges without installing .NET.
+
+So on some machines **WeMod's UI launches and the game runs, but trainers can't activate**
+until real .NET is present. If your Wine stack does install .NET 4.8/4.7.2 cleanly (many do),
+WANDA works end to end. For the .NET install itself, `winetricks dotnet48` against the WANDA
+prefix, or the battle-tested [`wemod-launcher`](https://github.com/DaniAsh551/wemod-launcher)
+project's .NET handling, are the paths most likely to succeed.
+
+The `.NET 4.8 install` step in `wanda init` currently uses `proton runinprefix`, which often
+silently no-ops; treat "installed successfully" with suspicion and verify (a real install makes
+`mscorlib.dll` ~5 MB and writes `HKLM\...\NDP\v4\Full\Release`).
+
+---
+
 ## Project layout
 
 ```
