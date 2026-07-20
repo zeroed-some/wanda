@@ -336,11 +336,12 @@ impl<'a> WemodInstaller<'a> {
         info!("Starting WeMod from: {}", wemod_exe.display());
         info!("Using wine: {}", wine);
 
-        // Run WeMod with minimal flags for Wine/Proton compatibility
-        // Only --no-sandbox is required; additional GPU flags can cause issues
+        // Run WeMod with the shared Electron flags for Wine/Proton: no sandbox
+        // plus GPU/DirectComposition disabled (Wine lacks DirectComposition,
+        // which otherwise leaves WeMod's window black).
         let child = Command::new(&wine)
             .arg(&wemod_exe)
-            .arg("--no-sandbox")  // Required for Electron under Wine
+            .args(crate::launcher::WEMOD_ELECTRON_FLAGS.split(' '))
             .envs(&env)
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())

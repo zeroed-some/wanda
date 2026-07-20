@@ -572,7 +572,7 @@ set SteamGameId=
 set SteamOverlayGameId=
 set STEAM_COMPAT_APP_ID=
 
-start "" "{wemod_path}" --no-sandbox
+start "" "{wemod_path}" {wemod_flags}
 
 echo [WANDA] Waiting for WeMod to initialize...
 ping 127.0.0.1 -n 12 > NUL 2>&1
@@ -589,6 +589,7 @@ ping 127.0.0.1 -n 30 > NUL 2>&1
 goto keepalive
 "#,
         wemod_path = wemod_win_path,
+        wemod_flags = wanda_core::launcher::WEMOD_ELECTRON_FLAGS,
         game_path = game_win_path,
     );
 
