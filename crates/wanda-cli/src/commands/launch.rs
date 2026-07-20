@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use wanda_core::{
     config::WandaConfig,
     launcher::{GameLauncher, LaunchConfig},
-    prefix::PrefixManager,
+    prefix::{PrefixBuilder, PrefixManager},
     steam::{ProtonManager, SteamInstallation},
     Result, WandaError,
 };
@@ -181,6 +181,16 @@ pub async fn run(args: LaunchArgs, config_path: Option<PathBuf>) -> Result<()> {
         };
 
         println!("  Using WeMod with {}", proton.name);
+
+        // Patch mscorlib in the prefix we're launching in so WeMod's .NET
+        // version check passes. The default prefix is patched at creation, but
+        // a game's own compatdata prefix (Wine Mono, reports .NET 4.0) is not —
+        // without this WeMod fails its ">= 4.7" check when activating trainers.
+        // Idempotent: re-patching an already-patched mscorlib is a no-op.
+        let builder = PrefixBuilder::new(&launch_prefix.path, proton);
+        if let Err(e) = builder.patch_mscorlib_version() {
+            eprintln!("  Warning: mscorlib patch failed (WeMod may show a .NET error): {}", e);
+        }
 
         // Create launcher
         let launcher = GameLauncher::new(&steam, launch_prefix, proton);
