@@ -18,6 +18,19 @@ use std::time::Duration;
 use tokio::process::{Child, Command};
 use tracing::{debug, info};
 
+/// Command-line flags passed to WeMod's Electron app.
+///
+/// `--no-sandbox` is required for Electron under Wine. The rest force fully
+/// software rendering/compositing, because WeMod's Chromium otherwise composites
+/// via Windows DirectComposition, which Wine doesn't implement
+/// (`DCompositionCreateDevice3 failed: Not implemented`), leaving the window
+/// black:
+/// - `--disable-gpu`             disable GPU rasterization
+/// - `--disable-gpu-compositing` composite in software instead of the GPU
+/// - `--disable-direct-composition` don't present via DirectComposition
+pub const WEMOD_ELECTRON_FLAGS: &str =
+    "--no-sandbox --disable-gpu --disable-gpu-compositing --disable-direct-composition";
+
 /// Get the log file path
 fn log_file_path() -> PathBuf {
     dirs::data_local_dir()
@@ -263,37 +276,47 @@ impl<'a> GameLauncher<'a> {
 
         // Create batch file content
         // Uses Windows batch syntax to:
-        // 1. Start WeMod in the background
+        // 1. Start WeMod in the background, redirecting its output to a log
         // 2. Wait for WeMod to initialize (using ping for delay)
-        // 3. Start the game and wait for it to exit
+        // 3. Start the game and wait for it to exit, redirecting to a log
         // 4. Kill WeMod when game exits
+        //
+        // WeMod and the game are launched via `cmd /c "... > log 2>&1"` so
+        // their stdout/stderr (Electron/Wine errors, crash traces) are
+        // captured to C:\wanda\wemod.log and C:\wanda\game.log. Without this,
+        // `start` gives them a detached console and the output is lost —
+        // WeMod's own log dir stays empty when it crashes early.
         let batch_content = format!(
 r#"@echo off
 @title WANDA Launcher
 
-echo WANDA Launcher starting...
-echo.
+echo [WANDA] Launcher starting...
+if not exist C:\wanda mkdir C:\wanda
 
-REM WeMod executable path
 SET wemodpath={wemod_path}
 SET wemodname=WeMod.exe
 
-echo Starting WeMod: %wemodpath%
-start "" "%wemodpath%" --no-sandbox
+echo [WANDA] Starting WeMod: %wemodpath%
+echo [WANDA] WeMod output -^> C:\wanda\wemod.log
+start "" cmd /c ""%wemodpath%" {wemod_flags} > C:\wanda\wemod.log 2>&1"
 
-echo Waiting {delay} seconds for WeMod to initialize...
+echo [WANDA] Waiting {delay} seconds for WeMod to initialize...
 ping localhost -n {ping_count} > NUL 2>&1
 
 echo.
-echo Starting game: {game_path}
-echo Arguments: {game_args}
+echo [WANDA] Starting game: {game_path}
+echo [WANDA] Arguments: {game_args}
+echo [WANDA] Game output -^> C:\wanda\game.log
 echo.
 
-REM Start the game and wait for it to exit
-start /wait "" "{game_path}" {game_args}
+REM Run the game and wait for it to exit; capture its output to a log.
+REM Invoked directly (not via `start`) so the batch inherits and redirects
+REM its console output, and so QueryFullProcessImageName still sees the C:
+REM path WeMod matches against.
+"{game_path}" {game_args} > C:\wanda\game.log 2>&1
 
 echo.
-echo Game exited, closing WeMod...
+echo [WANDA] Game exited, closing WeMod...
 
 REM Find and kill WeMod process
 for /F "TOKENS=1,2,*" %%a in ('C:/windows/system32/tasklist /FI "IMAGENAME eq %wemodname%"') do (
@@ -301,13 +324,14 @@ for /F "TOKENS=1,2,*" %%a in ('C:/windows/system32/tasklist /FI "IMAGENAME eq %w
 )
 if defined wemodPID (
     C:/windows/system32/taskkill.exe /PID %wemodPID% /F 2>NUL
-    echo Closed WeMod
+    echo [WANDA] Closed WeMod
 )
 
 echo.
-echo WANDA Launcher finished
+echo [WANDA] Launcher finished
 "#,
             wemod_path = wemod_win_path,
+            wemod_flags = WEMOD_ELECTRON_FLAGS,
             delay = delay_seconds,
             ping_count = delay_seconds + 1, // ping -n N waits N-1 seconds
             game_path = game_win_path,
@@ -346,7 +370,7 @@ echo.
 SET wemodpath={wemod_path}
 
 echo Starting WeMod: %wemodpath%
-start "" "%wemodpath%" --no-sandbox
+start "" "%wemodpath%" {wemod_flags}
 
 echo Waiting for WeMod to initialize...
 ping localhost -n 6 > NUL 2>&1
@@ -361,6 +385,7 @@ ping localhost -n 30 > NUL 2>&1
 goto wait
 "#,
             wemod_path = wemod_win_path,
+            wemod_flags = WEMOD_ELECTRON_FLAGS,
         );
 
         // Windows cmd.exe requires CRLF line endings
